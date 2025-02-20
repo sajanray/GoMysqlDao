@@ -8,16 +8,18 @@ import (
 	"log"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
-// 自定义错误
-var U_ERR_TableNameNotFound = errors.New("table name not found")
-var U_ERR_DstMouldAssertStruct = errors.New("dstMould is need struct")
-var U_ERR_GetConnectError = errors.New("get mysql connect error")
+// UErrTableNameNotFound 自定义错误
+var UErrTableNameNotFound = errors.New("table name not found")
+var UErrDstModelAssertStruct = errors.New("dstModel is need struct")
+var UErrGetConnectError = errors.New("get mysql connect error")
 
-// MsqlDao 操作数据库 基础结构体
+// MysqlDao 操作数据库 基础结构体
 type MysqlDao struct {
+	//主键
 	Pk string
 	//表名
 	TableName string
@@ -38,14 +40,14 @@ func (md *MysqlDao) getPool() *MysqlConnectPool {
 	}
 }
 
-// 释放数据库连接,一般不需要调用,连接其它数据库实例，临时用一次后释放可以调用该方法
+// Free 释放数据库连接,一般不需要调用,连接其它数据库实例，临时用一次后释放可以调用该方法
 func (md *MysqlDao) Free() {
 	if md.LocalConnectPool != nil {
 		md.LocalConnectPool.Free()
 	}
 }
 
-// 开启事务
+// Begin 开启事务
 func (md *MysqlDao) Begin() {
 	//捕获异常
 	defer func() {
@@ -64,11 +66,11 @@ func (md *MysqlDao) Begin() {
 		}
 		md.isBegin = true
 	} else {
-		panic(U_ERR_GetConnectError)
+		panic(UErrGetConnectError)
 	}
 }
 
-// 提交事务
+// Commit 提交事务
 func (md *MysqlDao) Commit() {
 	//捕获异常
 	defer func() {
@@ -86,7 +88,7 @@ func (md *MysqlDao) Commit() {
 	}
 }
 
-// 回滚事务
+// Rollback 回滚事务
 func (md *MysqlDao) Rollback() {
 	//捕获异常
 	defer func() {
@@ -103,15 +105,16 @@ func (md *MysqlDao) Rollback() {
 	}
 }
 
-// 构建一个where条件集合
+// BuildWhere 构建一个where条件集合
+// 格式要求：1、冒号开头的两个参数为一组；2、非冒号开头的三个参数为一组；3、最后一个参数可以是1个参数为一组
 func (md *MysqlDao) BuildWhere(params ...interface{}) *MysqlWhereColl {
 	length := len(params)
 	if length == 0 {
 		return NewMysqlWhereColl()
 	}
 	where := NewMysqlWhereColl()
-	var i int = 0
-	var end int = 0
+	var i = 0
+	var end = 0
 	for {
 		if i >= length {
 			break
@@ -132,13 +135,10 @@ func (md *MysqlDao) BuildWhere(params ...interface{}) *MysqlWhereColl {
 	return where
 }
 
-// 查询一条记录
-// whColl 	where条件
-// fields 	要查询的字段，多个字段用逗号分隔，查询所有传"*"即可
-// dstMould 	模型，告诉处理逻辑该用什么数据结构去容纳查询的结构，只是一个模具而已，为提高内存使用率，该参数也接收返回值同result效果相同
-// result 	返回的结果，当dstMould=nil是返回map，当dstMould时struct时返回结构体，在处理result是请使用断言处理
-// err		错误信息
-func (md *MysqlDao) One(whColl *MysqlWhereColl, fields string, dstMould interface{}) (result interface{}, err error) {
+// One 查询一条记录
+// result 返回的结果，当DstModel=nil是返回map，当DstModel时struct时返回结构体，在处理result是请使用断言处理
+// err 错误信息
+func (md *MysqlDao) One(option OneOption) (result interface{}, err error) {
 	//捕获异常
 	defer func() {
 		if err := recover(); err != nil {
@@ -148,26 +148,30 @@ func (md *MysqlDao) One(whColl *MysqlWhereColl, fields string, dstMould interfac
 	}()
 
 	//构造sql语句
-	sqlStr, parseWhere, err := md.BuildSelectSql(whColl, fields)
+	buildSqlReturn, err := md.BuildSelectSql(&BuildSqlOption{
+		Where:     option.Where,
+		Fields:    option.Fields,
+		TableName: option.TableName,
+		Pk:        option.Pk,
+		ForUpdate: option.ForUpdate,
+		Write:     option.Write,
+	})
 	if err != nil {
 		return
 	}
 
 	//执行查询
-	tmp, err := md.Query(&sqlStr, parseWhere.Param, dstMould, whColl.UseWrite)
+	tmp, err := md.Query(&buildSqlReturn.Sql, buildSqlReturn.ParseResult.Param, option.DstModel, option.Write)
 	if err == nil && tmp != nil && len(tmp) > 0 {
 		result = tmp[0]
 	}
 	return
 }
 
-// 查询多条数据
-// whColl 	  where条件
-// fields 	 要查询的字段，多个字段用逗号分隔，查询所有传"*"即可
-// dstMould  模型，告诉处理逻辑该用什么数据结构去容纳查询的结构，只是一个模具而已
-// result 	 返回的结果，当dstMould=nil是返回切片map，当dstMould时struct时返回切片结构体，在处理result是请使用断言处理
-// err		 错误信息
-func (md *MysqlDao) More(whColl *MysqlWhereColl, fields string, dstMould interface{}) (result []interface{}, err error) {
+// More 查询多条数据
+// result 返回的结果，当dstModel=nil是返回切片map，当dstModel时struct时返回切片结构体，在处理result是请使用断言处理
+// err 错误信息
+func (md *MysqlDao) More(option MoreOption) (result []interface{}, totals int64, err error) {
 	defer func() {
 		if err := recover(); err != nil {
 			pc, file, no, ok := runtime.Caller(1)
@@ -176,24 +180,47 @@ func (md *MysqlDao) More(whColl *MysqlWhereColl, fields string, dstMould interfa
 	}()
 
 	//构造sql语句
-	sqlStr, parseWhere, err := md.BuildSelectSql(whColl, fields)
+	buildSqlReturn, err := md.BuildSelectSql(&BuildSqlOption{
+		Where:     option.Where,
+		Fields:    option.Fields,
+		TableName: option.TableName,
+		Pk:        option.Pk,
+		ForUpdate: option.ForUpdate,
+		Write:     option.Write,
+		CalcCount: option.CalcCount,
+	})
 	if err != nil {
 		return
 	}
 
 	//查询数据
-	result, err = md.Query(&sqlStr, parseWhere.Param, dstMould, whColl.UseWrite)
+	result, err = md.Query(&buildSqlReturn.Sql, buildSqlReturn.ParseResult.Param, option.DstModel, option.Write)
+	if err != nil {
+		return
+	}
+
+	//查询总数
+	if option.CalcCount {
+		rowsRet := make([]interface{}, 0)
+		rowsRet, err = md.Query(&buildSqlReturn.CalcSql, buildSqlReturn.ParseResult.Param, nil, option.Write)
+		if err != nil {
+			return
+		}
+		res, _ := rowsRet[0].(map[string]interface{})
+		n1, _ := res["counts"].(string)
+		totals, err = strconv.ParseInt(n1, 10, 0)
+	}
 	return
 }
 
-// 执行查询 用于执行select语句
+// Query 执行查询 用于执行select语句
 // sqlStr	sql语句
 // params	sql语句里面的占位符参数
-// dstMould	返回结果数据结构 nil:返回map  struct:返回结构体
+// dstModel	返回结果数据结构 nil:返回map  struct:返回结构体
 // isMaster	是否强制使用主库查询
-// result 	返回的结果，当dstMould=nil是返回切片map，当dstMould时struct时返回切片结构体，在处理result是请使用断言处理
+// result 	返回的结果，当dstModel=nil是返回切片map，当dstModel时struct时返回切片结构体，在处理result是请使用断言处理
 // err		错误信息
-func (md *MysqlDao) Query(sqlStr *string, params []interface{}, dstMould interface{}, isMaster bool) (result []interface{}, err error) {
+func (md *MysqlDao) Query(sqlStr *string, params []interface{}, dstModel interface{}, isMaster bool) (result []interface{}, err error) {
 	//日志记录执行的sql
 	pc, file, no, ok := runtime.Caller(1)
 	log.Printf("INFO debugSQL:%s params:%v %s:%d ptr:%v ok:%v", *sqlStr, params, file, no, pc, ok)
@@ -214,20 +241,20 @@ func (md *MysqlDao) Query(sqlStr *string, params []interface{}, dstMould interfa
 		return
 	}
 
-	if dstMould != nil {
-		dstMouldReflect, err := md.assertStruct(dstMould)
+	if dstModel != nil {
+		dstModelReflect, err := md.assertStruct(dstModel)
 		if err != nil {
 			return result, err
 		}
 		jts := JTStools.NewMapToStruct()
 
 		for i, mapV := range mapData {
-			if i == 0 { //第一个元素存放在dstMould 这块内存空间，提高内存使用效率
-				jts.Transform(dstMould, mapV)
-				result = append(result, dstMould)
+			if i == 0 { //第一个元素存放在dstModel 这块内存空间，提高内存使用效率
+				jts.Transform(dstModel, mapV)
+				result = append(result, dstModel)
 			} else {
 				//根据模具创建对象
-				dstItem := reflect.New(dstMouldReflect).Interface()
+				dstItem := reflect.New(dstModelReflect).Interface()
 				jts.Transform(dstItem, mapV)
 				result = append(result, dstItem)
 			}
@@ -239,7 +266,7 @@ func (md *MysqlDao) Query(sqlStr *string, params []interface{}, dstMould interfa
 	return result, err
 }
 
-// 使用主库 Exec执行一次命令（包括查询、删除、更新、插入等），不返回任何执行结果。参数args表示query中的占位参数。
+// Exec 使用主库 Exec执行一次命令（包括查询、删除、更新、插入等），不返回任何执行结果。参数args表示query中的占位参数。
 // sqlStr	sql语句
 // params	sql语句里面的占位符参数
 // result	返回的结果
@@ -254,7 +281,7 @@ func (md *MysqlDao) Exec(sqlStr *string, params []interface{}) (result sql.Resul
 	return
 }
 
-// 插入数据
+// Insert 插入数据
 // sqlStr	sql语句
 // args 		第一个参数设定为表名
 // newId 	返回插入之后数据的主键ID
@@ -275,7 +302,7 @@ func (md *MysqlDao) Insert(data map[string]interface{}, args ...string) (newId i
 		tableName = md.TableName
 	}
 	if len(tableName) == 0 {
-		err = U_ERR_TableNameNotFound
+		err = UErrTableNameNotFound
 		return
 	}
 
@@ -308,7 +335,7 @@ func (md *MysqlDao) Insert(data map[string]interface{}, args ...string) (newId i
 	return
 }
 
-// 更新数据
+// Update 更新数据
 // args 第一个参数设定为表名
 func (md *MysqlDao) Update(upData *MysqlWhereColl, upWhere *MysqlWhereColl, args ...string) (effectRows int64, err error) {
 	defer func() {
@@ -326,7 +353,7 @@ func (md *MysqlDao) Update(upData *MysqlWhereColl, upWhere *MysqlWhereColl, args
 		tableName = md.TableName
 	}
 	if len(tableName) == 0 {
-		err = U_ERR_TableNameNotFound
+		err = UErrTableNameNotFound
 		return
 	}
 
@@ -337,9 +364,9 @@ func (md *MysqlDao) Update(upData *MysqlWhereColl, upWhere *MysqlWhereColl, args
 	var sqlStr string
 	var whereStr string
 	if len(whereReturn.SqlWHere) > 0 {
-		whereStr = " WHERE" + whereReturn.SqlWhereToString(" AND ")
+		whereStr = " WHERE " + whereReturn.SqlWhereToString(fmt.Sprintf(" %s ", upWhere.WhereJoinStr))
 	}
-	sqlStr = fmt.Sprintf("UPDATE %s SET%s%s", tableName, updateSetData.SqlWhereToString(", "), whereStr)
+	sqlStr = fmt.Sprintf("UPDATE %s SET %s%s", tableName, updateSetData.SqlWhereToString(", "), whereStr)
 
 	//日志
 	pc, file, no, ok := runtime.Caller(1)
@@ -361,7 +388,7 @@ func (md *MysqlDao) Update(upData *MysqlWhereColl, upWhere *MysqlWhereColl, args
 	return
 }
 
-// 删除数据
+// Delete 删除数据
 // args 第一个参数设定为表名
 func (md *MysqlDao) Delete(delWhere *MysqlWhereColl, args ...string) (effectRows int64, err error) {
 	defer func() {
@@ -379,7 +406,7 @@ func (md *MysqlDao) Delete(delWhere *MysqlWhereColl, args ...string) (effectRows
 		tableName = md.TableName
 	}
 	if len(tableName) == 0 {
-		err = U_ERR_TableNameNotFound
+		err = UErrTableNameNotFound
 		return
 	}
 
@@ -387,7 +414,7 @@ func (md *MysqlDao) Delete(delWhere *MysqlWhereColl, args ...string) (effectRows
 	whereReturn := delWhere.ParseWhere()
 	var whereStr string
 	if len(whereReturn.SqlWHere) > 0 {
-		whereStr = " WHERE" + whereReturn.SqlWhereToString(" AND ")
+		whereStr = " WHERE " + whereReturn.SqlWhereToString(fmt.Sprintf(" %s ", delWhere.WhereJoinStr))
 	}
 	sqlStr := fmt.Sprintf("DELETE FROM %s%s", tableName, whereStr)
 
@@ -410,44 +437,63 @@ func (md *MysqlDao) Delete(delWhere *MysqlWhereColl, args ...string) (effectRows
 	return
 }
 
-// 解析where条件，构建sql语句
-func (md *MysqlDao) BuildSelectSql(whColl *MysqlWhereColl, fields string) (sqlStr string, whereReturn ParseWhereReturn, err error) {
+// BuildSelectSql 解析where条件，构建sql语句
+func (md *MysqlDao) BuildSelectSql(option *BuildSqlOption) (buildSqlReturn BuildSqlReturn, err error) {
 	//处理表名
 	var tableName string
-	if len(whColl.TableName) > 0 {
-		tableName = whColl.TableName
+	if len(option.TableName) > 0 {
+		tableName = option.TableName
 	} else if len(md.TableName) > 0 {
 		tableName = md.TableName
 	} else {
-		err = U_ERR_TableNameNotFound
+		err = UErrTableNameNotFound
 		return
 	}
 
 	//解析where条件 拼装SQL语句
-	whereReturn = whColl.ParseWhere()
-	whereStr := whereReturn.SqlWhereToString(" AND ")
+	buildSqlReturn.ParseResult = option.Where.ParseWhere()
+	whereStr := buildSqlReturn.ParseResult.SqlWhereToString(fmt.Sprintf(" %s ", option.Where.WhereJoinStr))
 	if len(whereStr) > 0 {
-		whereStr = fmt.Sprintf(" WHERE%s", whereStr)
+		whereStr = fmt.Sprintf(" WHERE %s", whereStr)
 	}
 	var baseSql string
-	if !strings.EqualFold(whereReturn.Basesql, "") {
-		baseSql = whereReturn.Basesql
+	var calcSql string
+	if !strings.EqualFold(buildSqlReturn.ParseResult.BaseSql, "") {
+		baseSql = buildSqlReturn.ParseResult.BaseSql
+		if option.CalcCount {
+			calcSql = fmt.Sprintf("SELECT COUNT(*) as counts FROM %s", tableName)
+		}
 	} else {
+		fields := "*"
+		if len(option.Fields) > 0 {
+			fields = option.Fields
+		}
 		baseSql = fmt.Sprintf("SELECT %s FROM %s", fields, tableName)
+		if option.CalcCount {
+			calcSql = fmt.Sprintf("SELECT COUNT(*) as counts FROM %s", tableName)
+		}
 	}
-	sqlStr = fmt.Sprintf("%s%s%s%s%s%s",
+	buildSqlReturn.Sql = fmt.Sprintf("%s%s%s%s%s%s",
 		baseSql,
 		whereStr,
-		whereReturn.Group,
-		whereReturn.Having,
-		whereReturn.Order,
-		whereReturn.Limit)
+		buildSqlReturn.ParseResult.Group,
+		buildSqlReturn.ParseResult.Having,
+		buildSqlReturn.ParseResult.Order,
+		buildSqlReturn.ParseResult.Limit)
+
+	if option.CalcCount {
+		buildSqlReturn.CalcSql = fmt.Sprintf("%s%s%s%s",
+			calcSql,
+			whereStr,
+			buildSqlReturn.ParseResult.Group,
+			buildSqlReturn.ParseResult.Having)
+	}
 	return
 }
 
 // ParseUpdateSetData 解析update时set数据
 func (md *MysqlDao) ParseUpdateSetData(whColl *MysqlWhereColl) (whereReturn ParseWhereReturn) {
-	for _, item := range whColl.WhereColl {
+	for _, item := range whColl.WhereItems {
 		whereReturn.SqlWHere = append(whereReturn.SqlWHere, fmt.Sprintf("%s = ?", item.Field))
 		if item.ItemValue.ValueIsInt() {
 			whereReturn.Param = append(whereReturn.Param, item.ItemValue.IntValue)
@@ -458,7 +504,7 @@ func (md *MysqlDao) ParseUpdateSetData(whColl *MysqlWhereColl) (whereReturn Pars
 	return whereReturn
 }
 
-// 解析多行结果为map
+// ParseRowsToMap 解析多行结果为map
 // result  在出错或者数据为空的情况下返回nil
 func (md *MysqlDao) ParseRowsToMap(rows *sql.Rows) (result []interface{}, err error) {
 	defer func(rows *sql.Rows) {
@@ -507,16 +553,16 @@ func (md *MysqlDao) ParseRowsToMap(rows *sql.Rows) (result []interface{}, err er
 }
 
 // 断言目标是否是结构体
-func (md *MysqlDao) assertStruct(dstMould interface{}) (dstMouldReflect reflect.Type, err error) {
+func (md *MysqlDao) assertStruct(dstModel interface{}) (dstModelReflect reflect.Type, err error) {
 	//获取模具类型
-	dstMouldReflect = reflect.TypeOf(dstMould)
+	dstModelReflect = reflect.TypeOf(dstModel)
 	//如果是指针需要.Elem
-	if dstMouldReflect.Kind() == reflect.Ptr {
-		dstMouldReflect = dstMouldReflect.Elem()
+	if dstModelReflect.Kind() == reflect.Ptr {
+		dstModelReflect = dstModelReflect.Elem()
 	}
 	//如果dst是结构体
-	if dstMouldReflect.Kind() != reflect.Struct {
-		err = U_ERR_DstMouldAssertStruct
+	if dstModelReflect.Kind() != reflect.Struct {
+		err = UErrDstModelAssertStruct
 	}
 	return
 }
@@ -535,9 +581,9 @@ func (md *MysqlDao) collectStructAddress(st interface{}) []interface{} {
 
 // collectDstAddress 提取切片元素的地址
 func (md *MysqlDao) collectDstAddress(sqlValues []sql.RawBytes) []interface{} {
-	couts := len(sqlValues)
-	scanArgs := make([]interface{}, couts)
-	for i := 0; i < couts; i++ {
+	counts := len(sqlValues)
+	scanArgs := make([]interface{}, counts)
+	for i := 0; i < counts; i++ {
 		scanArgs[i] = &sqlValues[i]
 	}
 	return scanArgs

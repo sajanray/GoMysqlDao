@@ -9,7 +9,7 @@ import (
 )
 
 func init() {
-	fmt.Println("初始化数据库连接")
+	//初始化数据库连接
 	GoMysqlDao.InitMysqlPool(confFile)
 }
 
@@ -20,10 +20,22 @@ type Test struct {
 	CreateTime string `json:"create_time"`
 }
 
+func TestMoreCount(t *testing.T) {
+	testModel := models.GetTestInstance()
+	where := testModel.BuildWhere("id", ">", 0, ":limit", "0,5")
+	more, totals, err := testModel.More(GoMysqlDao.MoreOption{Where: where, CalcCount: true})
+	if err != nil {
+		fmt.Println(err)
+	} else {
+		fmt.Println(more)
+		fmt.Println("总条数：", totals)
+	}
+}
+
 func TestModel(t *testing.T) {
 	test := models.GetTestInstance()
 	where := test.BuildWhere("id=1")
-	one, err := test.One(where, "*", nil)
+	one, err := test.One(GoMysqlDao.OneOption{Where: where})
 	fmt.Println("再次调用GetInstance")
 	test2 := models.GetUserInstance()
 	fmt.Println(test2)
@@ -34,18 +46,17 @@ func TestModel(t *testing.T) {
 	} else {
 		t.Log(one)
 	}
-
 }
 
 // 快接构建where条件
-func TestBuildwhere(t *testing.T) {
+func TestBuildWhere(t *testing.T) {
 	test := models.GetTestInstance()
 	where := test.BuildWhere(
 		":limit", "1",
 		"id", ">=", 1,
 		":order", "id DESC",
 		"id=1")
-	one, err := test.One(where, "*", nil)
+	one, err := test.One(GoMysqlDao.OneOption{Where: where})
 	if err != nil {
 		t.Fatal(err.Error())
 		return
@@ -60,7 +71,7 @@ func TestInsert(t *testing.T) {
 	dao := GoMysqlDao.MysqlDao{}
 	dao.LocalConnectPool = GoMysqlDao.NewMysqlPool(confFile)
 	dao.TableName = "test"
-	data := make(map[string]interface{}, 0)
+	data := make(map[string]interface{})
 	data["name"] = fmt.Sprintf("zhang_%d", num)
 	data["mobile"] = fmt.Sprintf("1381039%d", num)
 	id, err := dao.Insert(data)
@@ -77,11 +88,10 @@ func TestOne(t *testing.T) {
 	dao.LocalConnectPool = GoMysqlDao.NewMysqlPool(confFile)
 	dao.TableName = "test"
 	where := GoMysqlDao.NewMysqlWhereColl()
-	where.SetTableName("test")
 	where.Add("id", ">", 1)
 
 	test := new(Test)
-	_, err := dao.One(where, "*", test)
+	_, err := dao.One(GoMysqlDao.OneOption{Where: where, DstModel: test})
 	if err != nil {
 		t.Fatal(err.Error())
 	} else {
@@ -94,12 +104,11 @@ func TestOne2(t *testing.T) {
 	dao.LocalConnectPool = GoMysqlDao.NewMysqlPool(confFile)
 	dao.TableName = "test"
 	where := GoMysqlDao.NewMysqlWhereColl()
-	where.SetTableName("test")
 	where.Add(":sql", "select a.* from test as a")
 	where.Add("a.id", ">", 1)
 
 	test := new(Test)
-	_, err := dao.One(where, "", test)
+	_, err := dao.One(GoMysqlDao.OneOption{Where: where, DstModel: test})
 	if err != nil {
 		t.Fatal(err.Error())
 	} else {
@@ -113,7 +122,6 @@ func TestBuildSql(t *testing.T) {
 	dao.TableName = "test"
 
 	where := GoMysqlDao.NewMysqlWhereColl()
-	where.SetTableName("test")
 	where.Add("id", 1)
 	where.Add("age", ">", 20)
 	where.Add("name", "=", "zhangshan")
@@ -123,11 +131,13 @@ func TestBuildSql(t *testing.T) {
 	where.Add(":order", "status")
 	where.Add(":limit", "10,20")
 	where.Add(":having", "c>1")
-	sql, _, err := dao.BuildSelectSql(where, "*")
+	buildSqlReturn, err := dao.BuildSelectSql(&GoMysqlDao.BuildSqlOption{
+		Where: where,
+	})
 	if err != nil {
 		t.Fatal(err.Error())
 	} else {
-		t.Logf(sql)
+		t.Logf(buildSqlReturn.Sql)
 	}
 }
 
@@ -140,7 +150,7 @@ func TestMore(t *testing.T) {
 	where.Add(":limit", 2)
 
 	test := new(Test)
-	rows, err := dao.More(where, "*", test)
+	rows, _, err := dao.More(GoMysqlDao.MoreOption{Where: where, DstModel: test})
 	if err != nil {
 		t.Fatal(err.Error())
 	} else {
@@ -235,5 +245,47 @@ func TestTransaction(t *testing.T) {
 		return
 	} else {
 		t.Log(exec)
+	}
+}
+
+func TestWhereOr(t *testing.T) {
+	//dao := GoMysqlDao.MysqlDao{}
+	where := GoMysqlDao.NewMysqlWhereColl()
+	where.Add("id", 1)
+	where.Add("id", 2)
+	where.WhereJoinStr = "OR"
+
+	where2 := GoMysqlDao.NewMysqlWhereColl()
+	where2.Add(where)
+	where2.Add("name", "tom")
+
+	p := where2.ParseWhere()
+	str := p.SqlWhereToString(" AND ")
+
+	if str == "((id = ?) OR (id = ?)) AND (name = ?)" {
+		t.Logf("Or 条件测试通过：" + str)
+	} else {
+		t.Fatal("Or 条件测试失败:", str)
+	}
+}
+
+func TestWhereOrQuery(t *testing.T) {
+	dao := GoMysqlDao.MysqlDao{
+		TableName: "test",
+	}
+	where := GoMysqlDao.NewMysqlWhereColl()
+	where.Add("id", 1)
+	where.Add("id", 2)
+	where.WhereJoinStr = "OR"
+
+	where2 := GoMysqlDao.NewMysqlWhereColl()
+	where2.Add(where)
+	where2.Add("name", "!=", "tom")
+
+	more, _, err := dao.More(GoMysqlDao.MoreOption{Where: where2})
+	if err != nil {
+		t.Fatal(err.Error())
+	} else {
+		t.Log(more)
 	}
 }

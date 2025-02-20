@@ -7,20 +7,14 @@ import (
 	"strings"
 )
 
-// SQL条件集合
+// MysqlWhereColl SQL条件集合
 type MysqlWhereColl struct {
-	//表名
-	TableName string
-	//where集合
-	WhereColl []mysqlWhereItem
-	//返回承载数据的结构体
-	ReturnStruct func() interface{}
-	//使用写库
-	UseWrite bool
-	//返回Map
-	ReturnMap bool
+	//where条件集合
+	WhereItems []mysqlWhereItem
 	//是否调试模式
 	Debug bool
+	//where条件之间的连接符
+	WhereJoinStr string
 }
 
 // where条件节点
@@ -40,9 +34,11 @@ type mysqlWhereItemValue struct {
 	SliceValue     interface{}
 	ValueType      reflect.Kind
 	SliceValueType reflect.Kind
+
+	WhereCollValue MysqlWhereColl
 }
 
-// 解析后的SQL WHERE条件
+// ParseWhereReturn 解析后的SQL WHERE条件
 type ParseWhereReturn struct {
 	SqlWHere []string
 	Param    []interface{}
@@ -50,22 +46,18 @@ type ParseWhereReturn struct {
 	Group    string
 	Having   string
 	Limit    string
-	Basesql  string
+	BaseSql  string
 }
 
-// 实例化一个MysqlWhereColl集合
+// NewMysqlWhereColl 实例化一个MysqlWhereColl集合
 func NewMysqlWhereColl() *MysqlWhereColl {
 	return &MysqlWhereColl{
-		WhereColl: make([]mysqlWhereItem, 0),
+		WhereItems:   make([]mysqlWhereItem, 0),
+		WhereJoinStr: "AND",
 	}
 }
 
-// 设置表名
-func (mwc *MysqlWhereColl) SetTableName(tableName string) {
-	mwc.TableName = tableName
-}
-
-// 添加where条件
+// Add 添加where条件
 func (mwc *MysqlWhereColl) Add(args ...interface{}) {
 	//参数校验
 	argsLen := len(args)
@@ -84,6 +76,34 @@ func (mwc *MysqlWhereColl) Add(args ...interface{}) {
 		field = fmt.Sprintf("%s", args[0])
 	} else if fType == reflect.Int {
 		field = fmt.Sprintf("%d", args[0])
+	} else if fType == reflect.Pointer {
+		if reflect.TypeOf(args[0]).Elem().String() == reflect.TypeOf(mwc).Elem().String() {
+			pWhereColl, ok := (args[0]).(*MysqlWhereColl)
+			if ok {
+				var param = mysqlWhereItem{
+					ItemValue: mysqlWhereItemValue{
+						ValueType:      reflect.Struct,
+						WhereCollValue: *pWhereColl,
+					},
+				}
+				mwc.WhereItems = append(mwc.WhereItems, param)
+			}
+		}
+		return
+	} else if fType == reflect.Struct {
+		if reflect.TypeOf(args[0]).String() == reflect.TypeOf(mwc).Elem().String() {
+			whereColl, ok := (args[0]).(MysqlWhereColl)
+			if ok {
+				var param = mysqlWhereItem{
+					ItemValue: mysqlWhereItemValue{
+						ValueType:      reflect.Struct,
+						WhereCollValue: whereColl,
+					},
+				}
+				mwc.WhereItems = append(mwc.WhereItems, param)
+			}
+		}
+		return
 	} else {
 		if mwc.Debug {
 			log.Println("args[0] mast be int or string")
@@ -102,16 +122,6 @@ func (mwc *MysqlWhereColl) Add(args ...interface{}) {
 			panic("The length of the ARG parameter must be 2")
 		}
 		value = args[1]
-		//if argsLen == 1 {
-		//} else if argsLen == 2 {
-		//	op = (args[1]).(string)
-		//} else if argsLen == 3 {
-		//	op = (args[1]).(string)
-		//	value = args[2]
-		//} else {
-		//	op = (args[1]).(string)
-		//	value = args[2:]
-		//}
 	} else {
 		switch argsLen {
 		case 1:
@@ -137,21 +147,74 @@ func (mwc *MysqlWhereColl) Add(args ...interface{}) {
 	if value != nil {
 		miv := mysqlWhereItemValue{}
 		miv.ValueType = reflect.TypeOf(value).Kind()
-		if miv.ValueType == reflect.Int {
+		switch miv.ValueType {
+		case reflect.Int:
 			miv.IntValue = value.(int)
-		} else if miv.ValueType == reflect.String {
+		case reflect.String:
 			miv.StringValue = value.(string)
-		} else if miv.ValueType == reflect.Slice {
+		case reflect.Slice:
 			miv.SliceValue = value
-			miv.SliceValueType = reflect.TypeOf(value).Elem().Kind()
+			miv.SliceValueType = reflect.TypeOf(value).Elem().Kind() //切片元素的数据类型
+		default:
 		}
 		param.ItemValue = miv
 	}
-	mwc.WhereColl = append(mwc.WhereColl, param)
+	mwc.WhereItems = append(mwc.WhereItems, param)
 }
 
 func (mwc *MysqlWhereColl) ParseWhere() (whereReturn ParseWhereReturn) {
-	for _, item := range mwc.WhereColl {
+	for _, item := range mwc.WhereItems {
+		if item.ItemValue.ValueIsStruct() {
+			ret := item.ItemValue.WhereCollValue.ParseWhere()
+			if len(ret.SqlWHere) > 0 {
+				joinStr := " " + item.ItemValue.WhereCollValue.WhereJoinStr + " "
+				whereStr := fmt.Sprintf("(%s)", ret.SqlWhereToString(joinStr))
+				whereReturn.SqlWHere = append(whereReturn.SqlWHere, whereStr)
+				if len(ret.Param) > 0 {
+					whereReturn.Param = append(whereReturn.Param, ret.Param...)
+				}
+			}
+			continue
+		}
+		if !strings.HasPrefix(item.Field, ":") {
+			//拼装SQL条件
+			whereString := fmt.Sprintf("(%s %s %s)", item.Field, item.Op, item.GetPlaceHolder())
+			whereReturn.SqlWHere = append(whereReturn.SqlWHere, whereString)
+
+			//按占位符顺序拼装参数
+			if item.ItemValue.ValueIsInt() {
+				whereReturn.Param = append(whereReturn.Param, item.ItemValue.IntValue)
+			} else if item.ItemValue.ValueIsString() {
+				whereReturn.Param = append(whereReturn.Param, item.ItemValue.StringValue)
+			} else if item.ItemValue.ValueIsSlice() {
+				//占位符
+				if item.ItemValue.SliceValueIsInt() {
+					for _, iv := range item.ItemValue.SliceValue.([]int) {
+						whereReturn.Param = append(whereReturn.Param, iv)
+					}
+				} else if item.ItemValue.SliceValueIsString() {
+					for _, iv := range item.ItemValue.SliceValue.([]string) {
+						whereReturn.Param = append(whereReturn.Param, iv)
+					}
+				} else if item.ItemValue.SliceValueIsInterface() {
+					for _, iv := range item.ItemValue.SliceValue.([]interface{}) {
+						whereReturn.Param = append(whereReturn.Param, iv)
+					}
+				}
+			}
+			continue
+		}
+
+		if item.FieldIsWhere() {
+			whereReturn.SqlWHere = append(whereReturn.SqlWHere, fmt.Sprintf("(%s)", item.ItemValue.StringValue))
+			continue
+		}
+
+		if item.FieldIsSql() {
+			whereReturn.BaseSql = item.ItemValue.StringValue
+			continue
+		}
+
 		if item.FieldIsGroup() {
 			whereReturn.Group = fmt.Sprintf(" GROUP BY %v", item.ItemValue.StringValue)
 			continue
@@ -179,49 +242,12 @@ func (mwc *MysqlWhereColl) ParseWhere() (whereReturn ParseWhereReturn) {
 			}
 			continue
 		}
-
-		if item.FieldIsSql() {
-			whereReturn.Basesql = item.ItemValue.StringValue
-			continue
-		}
-
-		//拼装SQL条件
-		var whereString string
-		if item.FieldIsWhere() {
-			whereString = fmt.Sprintf("(%s)", item.ItemValue.StringValue)
-			whereReturn.SqlWHere = append(whereReturn.SqlWHere, whereString)
-			continue
-		}
-		whereString = fmt.Sprintf("(%s %s %s)", item.Field, item.Op, item.GetPlaceHolder())
-		whereReturn.SqlWHere = append(whereReturn.SqlWHere, whereString)
-
-		//按占位符顺序拼装参数
-		if item.ItemValue.ValueIsInt() {
-			whereReturn.Param = append(whereReturn.Param, item.ItemValue.IntValue)
-		} else if item.ItemValue.ValueIsString() {
-			whereReturn.Param = append(whereReturn.Param, item.ItemValue.StringValue)
-		} else if item.ItemValue.ValueIsSlice() {
-			//占位符
-			if item.ItemValue.SliceValueType == reflect.Int {
-				for _, iv := range item.ItemValue.SliceValue.([]int) {
-					whereReturn.Param = append(whereReturn.Param, iv)
-				}
-			} else if item.ItemValue.SliceValueType == reflect.String {
-				for _, iv := range item.ItemValue.SliceValue.([]string) {
-					whereReturn.Param = append(whereReturn.Param, iv)
-				}
-			} else if item.ItemValue.SliceValueType == reflect.Interface {
-				for _, iv := range item.ItemValue.SliceValue.([]interface{}) {
-					whereReturn.Param = append(whereReturn.Param, iv)
-				}
-			}
-		}
 	}
 
 	return whereReturn
 }
 
-// 获取占位符
+// GetPlaceHolder 获取占位符
 func (mwi *mysqlWhereItem) GetPlaceHolder() string {
 	if mwi.ItemValue.ValueIsInt() || mwi.ItemValue.ValueIsString() {
 		if strings.EqualFold(mwi.Op, "IN") || strings.EqualFold(mwi.Op, "NOT IN") {
@@ -232,19 +258,15 @@ func (mwi *mysqlWhereItem) GetPlaceHolder() string {
 	} else if mwi.ItemValue.ValueIsSlice() {
 		var length int
 		//占位符
-		if mwi.ItemValue.SliceValueType == reflect.Int {
+		if mwi.ItemValue.SliceValueIsInt() {
 			length = len(mwi.ItemValue.SliceValue.([]int))
-		} else if mwi.ItemValue.SliceValueType == reflect.String {
+		} else if mwi.ItemValue.SliceValueIsString() {
 			length = len(mwi.ItemValue.SliceValue.([]string))
-		} else if mwi.ItemValue.SliceValueType == reflect.Interface {
+		} else if mwi.ItemValue.SliceValueIsInterface() {
 			length = len(mwi.ItemValue.SliceValue.([]interface{}))
 		}
 		if length > 0 {
-			var ph []string
-			for i := 0; i < length; i++ {
-				ph = append(ph, "?")
-			}
-			return fmt.Sprintf("(%s)", strings.Join(ph, ","))
+			return fmt.Sprintf("(%s)", strings.TrimRight(strings.Repeat("?,", length), ","))
 		} else {
 			return "(-900009)"
 		}
@@ -252,7 +274,7 @@ func (mwi *mysqlWhereItem) GetPlaceHolder() string {
 	return ""
 }
 
-// 判断是否是group
+// FieldIsGroup 判断是否是group
 func (mwi *mysqlWhereItem) FieldIsGroup() bool {
 	return strings.EqualFold(mwi.Field, ":group")
 }
@@ -285,13 +307,29 @@ func (miv *mysqlWhereItemValue) ValueIsString() bool {
 	return miv.ValueType == reflect.String
 }
 
+func (miv *mysqlWhereItemValue) ValueIsStruct() bool {
+	return miv.ValueType == reflect.Struct
+}
+
+func (miv *mysqlWhereItemValue) SliceValueIsInt() bool {
+	return miv.SliceValueType == reflect.Int
+}
+
+func (miv *mysqlWhereItemValue) SliceValueIsString() bool {
+	return miv.SliceValueType == reflect.String
+}
+
+func (miv *mysqlWhereItemValue) SliceValueIsInterface() bool {
+	return miv.SliceValueType == reflect.Interface
+}
+
 func (miv *mysqlWhereItemValue) ValueIsSlice() bool {
 	return miv.ValueType == reflect.Slice
 }
 
 func (pwr *ParseWhereReturn) SqlWhereToString(separate string) string {
 	if len(pwr.SqlWHere) > 0 {
-		return " " + strings.Join(pwr.SqlWHere, separate)
+		return strings.Join(pwr.SqlWHere, separate)
 	} else {
 		return ""
 	}

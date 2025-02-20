@@ -13,7 +13,7 @@ func TestParseWhere1(t *testing.T) {
 
 	r1 := w.SqlWHere[0] != "(name = ?)"
 	r2 := w.Param[0] != "tom"
-	r3 := w.SqlWhereToString("") != " (name = ?)"
+	r3 := w.SqlWhereToString("") != "(name = ?)"
 	if r1 || r2 || r3 {
 		t.Fatal("解析 = 失败")
 	} else {
@@ -29,7 +29,7 @@ func TestParseWhere2(t *testing.T) {
 
 	r1 := w.SqlWHere[0] != "(name = ?)"
 	r2 := w.Param[0] != "tom"
-	r3 := w.SqlWhereToString("") != " (name = ?)"
+	r3 := w.SqlWhereToString("") != "(name = ?)"
 	if r1 || r2 || r3 {
 		t.Fatal("解析 = 失败")
 	} else {
@@ -45,7 +45,7 @@ func TestParseWhere3(t *testing.T) {
 
 	r1 := w.SqlWHere[0] != "(name = ?)"
 	r2 := w.Param[0] != 0
-	r3 := w.SqlWhereToString("") != " (name = ?)"
+	r3 := w.SqlWhereToString("") != "(name = ?)"
 	if r1 || r2 || r3 {
 		t.Fatal("解析 = 失败")
 	} else {
@@ -61,7 +61,7 @@ func TestParseWhere4(t *testing.T) {
 
 	r1 := w.SqlWHere[0] != "(name = ?)"
 	r2 := w.Param[0] != 1
-	r3 := w.SqlWhereToString("") != " (name = ?)"
+	r3 := w.SqlWhereToString("") != "(name = ?)"
 	if r1 || r2 || r3 {
 		t.Fatal("解析 = 失败")
 	} else {
@@ -77,7 +77,7 @@ func TestParseWhere5(t *testing.T) {
 
 	r1 := w.SqlWHere[0] != "(age > ?)"
 	r2 := w.Param[0] != 18
-	r3 := w.SqlWhereToString("") != " (age > ?)"
+	r3 := w.SqlWhereToString("") != "(age > ?)"
 	if r1 || r2 || r3 {
 		t.Fatal("解析 > 失败")
 	} else {
@@ -93,7 +93,7 @@ func TestParseWhere6(t *testing.T) {
 
 	r1 := w.SqlWHere[0] != "(age >= ?)"
 	r2 := w.Param[0] != 18
-	r3 := w.SqlWhereToString("") != " (age >= ?)"
+	r3 := w.SqlWhereToString("") != "(age >= ?)"
 	if r1 || r2 || r3 {
 		t.Fatal("解析 >= 失败")
 	} else {
@@ -109,7 +109,7 @@ func TestParseWhere7(t *testing.T) {
 
 	r1 := w.SqlWHere[0] != "(age < ?)"
 	r2 := w.Param[0] != 18
-	r3 := w.SqlWhereToString("") != " (age < ?)"
+	r3 := w.SqlWhereToString("") != "(age < ?)"
 	if r1 || r2 || r3 {
 		t.Fatal("解析 < 失败")
 	} else {
@@ -125,7 +125,7 @@ func TestParseWhere8(t *testing.T) {
 
 	r1 := w.SqlWHere[0] != "(age <= ?)"
 	r2 := w.Param[0] != 18
-	r3 := w.SqlWhereToString("") != " (age <= ?)"
+	r3 := w.SqlWhereToString("") != "(age <= ?)"
 	if r1 || r2 || r3 {
 		t.Fatal("解析 <= 失败")
 	} else {
@@ -288,7 +288,7 @@ func TestParseWhere18(t *testing.T) {
 func TestParseWhere19(t *testing.T) {
 	where := GoMysqlDao.NewMysqlWhereColl()
 	where.Debug = true
-	var ids []int = make([]int, 0)
+	var ids = make([]int, 0)
 	where.Add("id", "IN", ids)
 	w := where.ParseWhere()
 
