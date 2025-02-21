@@ -35,7 +35,7 @@ func TestMoreCount(t *testing.T) {
 func TestModel(t *testing.T) {
 	test := models.GetTestInstance()
 	where := test.BuildWhere("id=1")
-	one, err := test.One(GoMysqlDao.OneOption{Where: where})
+	one, err := test.One(GoMysqlDao.OneOption{Where: where, Id: 100})
 	fmt.Println("再次调用GetInstance")
 	test2 := models.GetUserInstance()
 	fmt.Println(test2)
@@ -44,7 +44,7 @@ func TestModel(t *testing.T) {
 		t.Fatal(err.Error())
 		return
 	} else {
-		t.Log(one)
+		t.Log("查询结果:", one)
 	}
 }
 
@@ -68,7 +68,9 @@ func TestBuildWhere(t *testing.T) {
 // 插入测试
 func TestInsert(t *testing.T) {
 	num := rand.Intn(10000) + 1000
-	dao := GoMysqlDao.MysqlDao{}
+	dao := GoMysqlDao.MysqlDao{
+		GlobalScopeConf: models.GetGlobalScope(),
+	}
 	dao.LocalConnectPool = GoMysqlDao.NewMysqlPool(confFile)
 	dao.TableName = "test"
 	data := make(map[string]interface{})
@@ -116,6 +118,16 @@ func TestOne2(t *testing.T) {
 	}
 }
 
+func TestOne3(t *testing.T) {
+	model := models.GetTestInstance()
+	res, err := model.One(GoMysqlDao.OneOption{Id: 1, ForUpdate: true})
+	if err != nil {
+		t.Fatal(err.Error())
+	} else {
+		t.Log("查询结果：", res)
+	}
+}
+
 // 构建SQL测试
 func TestBuildSql(t *testing.T) {
 	dao := GoMysqlDao.MysqlDao{}
@@ -158,6 +170,39 @@ func TestMore(t *testing.T) {
 	}
 }
 
+func TestMore2(t *testing.T) {
+	dao := GoMysqlDao.MysqlDao{}
+	dao.LocalConnectPool = GoMysqlDao.NewMysqlPool(confFile)
+	dao.TableName = "test"
+	dao.Pk = "id"
+	ids := make([]interface{}, 0)
+	ids = append(ids, 1, 2, 3)
+	rows, c, err := dao.More(GoMysqlDao.MoreOption{Ids: ids, CalcCount: true})
+	if err != nil {
+		t.Fatal(err.Error())
+	} else {
+		t.Logf("%+v", rows)
+		t.Logf("%+v", c)
+	}
+}
+
+func TestMore3(t *testing.T) {
+	dao := GoMysqlDao.MysqlDao{
+		GlobalScopeConf: models.GetGlobalScope(),
+	}
+	dao.LocalConnectPool = GoMysqlDao.NewMysqlPool(confFile)
+	dao.TableName = "test"
+	dao.Pk = "id"
+	where := dao.BuildWhere(":sql", "SELECT * FROM test", "id>1")
+	rows, c, err := dao.More(GoMysqlDao.MoreOption{Where: where, CalcCount: true})
+	if err != nil {
+		t.Fatal(err.Error())
+	} else {
+		t.Logf("%+v", rows)
+		t.Logf("%+v", c)
+	}
+}
+
 // 更新测试
 func TestUpdate(t *testing.T) {
 	where := GoMysqlDao.NewMysqlWhereColl()
@@ -168,7 +213,8 @@ func TestUpdate(t *testing.T) {
 	up.Add("mobile", "13989898787")
 
 	dao := GoMysqlDao.MysqlDao{
-		TableName: "test",
+		TableName:       "test",
+		GlobalScopeConf: models.GetGlobalScope(),
 	}
 
 	update, err := dao.Update(up, where)
@@ -185,7 +231,8 @@ func TestDelete(t *testing.T) {
 	where.Add("id", 0)
 
 	dao := GoMysqlDao.MysqlDao{
-		TableName: "test",
+		TableName:       "test",
+		GlobalScopeConf: models.GetGlobalScope(),
 	}
 
 	update, err := dao.Delete(where)

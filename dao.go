@@ -7,6 +7,7 @@ import (
 	"github.com/sajanray/GoJsonToStruct"
 	"log"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -16,6 +17,17 @@ import (
 var UErrTableNameNotFound = errors.New("table name not found")
 var UErrDstModelAssertStruct = errors.New("dstModel is need struct")
 var UErrGetConnectError = errors.New("get mysql connect error")
+
+type GlobalScopeConf struct {
+	//全局where条件
+	GlobalScopeWhere *MysqlWhereColl
+	//是否启用全局where条件
+	WithGlobalScopeWhere bool
+	//全局插入的字段
+	GlobalScopeInsertField map[string]interface{}
+	//是否启用全局插入的字段
+	WithGlobalScopeInsertField bool
+}
 
 // MysqlDao 操作数据库 基础结构体
 type MysqlDao struct {
@@ -29,6 +41,8 @@ type MysqlDao struct {
 	dbTx *sql.Tx
 	//事务是否开始
 	isBegin bool
+	//全局配置
+	GlobalScopeConf GlobalScopeConf
 }
 
 // 获取连接池 区分自身连接池还是全局连接池
@@ -105,6 +119,16 @@ func (md *MysqlDao) Rollback() {
 	}
 }
 
+func (md *MysqlDao) MergeGlobalScopeWhere(where *MysqlWhereColl) {
+	if md.GlobalScopeConf.WithGlobalScopeWhere &&
+		md.GlobalScopeConf.GlobalScopeWhere != nil &&
+		md.GlobalScopeConf.GlobalScopeWhere.WhereItems != nil &&
+		len(md.GlobalScopeConf.GlobalScopeWhere.WhereItems) > 0 {
+		where.WhereItems = append(md.GlobalScopeConf.GlobalScopeWhere.WhereItems, where.WhereItems...)
+		//where.Add(md.GlobalScopeConf.GlobalScopeWhere)
+	}
+}
+
 // BuildWhere 构建一个where条件集合
 // 格式要求：1、冒号开头的两个参数为一组；2、非冒号开头的三个参数为一组；3、最后一个参数可以是1个参数为一组
 func (md *MysqlDao) BuildWhere(params ...interface{}) *MysqlWhereColl {
@@ -141,12 +165,26 @@ func (md *MysqlDao) BuildWhere(params ...interface{}) *MysqlWhereColl {
 func (md *MysqlDao) One(option OneOption) (result interface{}, err error) {
 	//捕获异常
 	defer func() {
-		if err := recover(); err != nil {
+		if e := recover(); e != nil {
 			pc, file, no, ok := runtime.Caller(1)
-			log.Printf("ERROR:%s %s:%d ptr:%v ok:%v", err, file, no, pc, ok)
+			log.Printf("ERROR:%s %s:%d ptr:%v ok:%v", e, file, no, pc, ok)
 		}
 	}()
 
+	//直接主键查询
+	if option.Id != nil {
+		if option.Where == nil {
+			option.Where = NewMysqlWhereColl()
+		}
+		if option.Pk != "" {
+			option.Where.Add(option.Pk, "=", option.Id)
+		} else if md.Pk != "" {
+			option.Where.Add(md.Pk, "=", option.Id)
+		}
+	}
+
+	//限定一条数据
+	option.Where.Add(":limit", 1)
 	//构造sql语句
 	buildSqlReturn, err := md.BuildSelectSql(&BuildSqlOption{
 		Where:     option.Where,
@@ -161,9 +199,12 @@ func (md *MysqlDao) One(option OneOption) (result interface{}, err error) {
 	}
 
 	//执行查询
-	tmp, err := md.Query(&buildSqlReturn.Sql, buildSqlReturn.ParseResult.Param, option.DstModel, option.Write)
+	tmp, err := md.Query(&buildSqlReturn.Sql, buildSqlReturn.ParseResult.Param, option.DstModel, option.Write || option.ForUpdate)
 	if err == nil && tmp != nil && len(tmp) > 0 {
 		result = tmp[0]
+	}
+	if err == sql.ErrNoRows {
+		return nil, nil
 	}
 	return
 }
@@ -178,6 +219,18 @@ func (md *MysqlDao) More(option MoreOption) (result []interface{}, totals int64,
 			log.Printf("ERROR:%s %s:%d ptr:%v ok:%v", err, file, no, pc, ok)
 		}
 	}()
+
+	//直接主键查询
+	if option.Ids != nil {
+		if option.Where == nil {
+			option.Where = NewMysqlWhereColl()
+		}
+		if option.Pk != "" {
+			option.Where.Add(option.Pk, "IN", option.Ids)
+		} else if md.Pk != "" {
+			option.Where.Add(md.Pk, "IN", option.Ids)
+		}
+	}
 
 	//构造sql语句
 	buildSqlReturn, err := md.BuildSelectSql(&BuildSqlOption{
@@ -194,8 +247,11 @@ func (md *MysqlDao) More(option MoreOption) (result []interface{}, totals int64,
 	}
 
 	//查询数据
-	result, err = md.Query(&buildSqlReturn.Sql, buildSqlReturn.ParseResult.Param, option.DstModel, option.Write)
+	result, err = md.Query(&buildSqlReturn.Sql, buildSqlReturn.ParseResult.Param, option.DstModel, option.Write || option.ForUpdate)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, 0, nil
+		}
 		return
 	}
 
@@ -310,10 +366,23 @@ func (md *MysqlDao) Insert(data map[string]interface{}, args ...string) (newId i
 	var field []string
 	var value []interface{}
 	var ph []string
+
+	//合并data
 	for k, v := range data {
 		field = append(field, k)
 		value = append(value, v)
 		ph = append(ph, "?")
+	}
+
+	//合并全局插入字段
+	if md.GlobalScopeConf.WithGlobalScopeInsertField && md.GlobalScopeConf.GlobalScopeInsertField != nil {
+		for k, v := range md.GlobalScopeConf.GlobalScopeInsertField {
+			if _, ok := data[k]; !ok {
+				field = append(field, k)
+				value = append(value, v)
+				ph = append(ph, "?")
+			}
+		}
 	}
 	sqlStr := fmt.Sprintf("INSERT INTO %s (%s) VALUE (%s)", tableName, strings.Join(field, ","), strings.Join(ph, ","))
 
@@ -359,6 +428,8 @@ func (md *MysqlDao) Update(upData *MysqlWhereColl, upWhere *MysqlWhereColl, args
 
 	//抽取字段名和值
 	updateSetData := md.ParseUpdateSetData(upData)
+	//合并全局where条件
+	md.MergeGlobalScopeWhere(upWhere)
 	whereReturn := upWhere.ParseWhere()
 	param := append(updateSetData.Param, whereReturn.Param...)
 	var sqlStr string
@@ -410,6 +481,8 @@ func (md *MysqlDao) Delete(delWhere *MysqlWhereColl, args ...string) (effectRows
 		return
 	}
 
+	//合并全局where条件
+	md.MergeGlobalScopeWhere(delWhere)
 	//抽取字段名和值
 	whereReturn := delWhere.ParseWhere()
 	var whereStr string
@@ -450,8 +523,12 @@ func (md *MysqlDao) BuildSelectSql(option *BuildSqlOption) (buildSqlReturn Build
 		return
 	}
 
+	//全局条件
+	md.MergeGlobalScopeWhere(option.Where)
+
 	//解析where条件 拼装SQL语句
 	buildSqlReturn.ParseResult = option.Where.ParseWhere()
+
 	whereStr := buildSqlReturn.ParseResult.SqlWhereToString(fmt.Sprintf(" %s ", option.Where.WhereJoinStr))
 	if len(whereStr) > 0 {
 		whereStr = fmt.Sprintf(" WHERE %s", whereStr)
@@ -461,7 +538,8 @@ func (md *MysqlDao) BuildSelectSql(option *BuildSqlOption) (buildSqlReturn Build
 	if !strings.EqualFold(buildSqlReturn.ParseResult.BaseSql, "") {
 		baseSql = buildSqlReturn.ParseResult.BaseSql
 		if option.CalcCount {
-			calcSql = fmt.Sprintf("SELECT COUNT(*) as counts FROM %s", tableName)
+			re := regexp.MustCompile(`(?i)(select .* from)`)
+			calcSql = re.ReplaceAllString(baseSql, "SELECT COUNT(*) as counts FROM")
 		}
 	} else {
 		fields := "*"
@@ -480,7 +558,9 @@ func (md *MysqlDao) BuildSelectSql(option *BuildSqlOption) (buildSqlReturn Build
 		buildSqlReturn.ParseResult.Having,
 		buildSqlReturn.ParseResult.Order,
 		buildSqlReturn.ParseResult.Limit)
-
+	if option.ForUpdate {
+		buildSqlReturn.Sql = buildSqlReturn.Sql + " FOR UPDATE"
+	}
 	if option.CalcCount {
 		buildSqlReturn.CalcSql = fmt.Sprintf("%s%s%s%s",
 			calcSql,
