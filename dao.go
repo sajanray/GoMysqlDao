@@ -210,7 +210,7 @@ func (md *MysqlDao) One(option OneOption) (result interface{}, err error) {
 }
 
 // More 查询多条数据
-// result 返回的结果，当dstModel=nil是返回切片map，当dstModel时struct时返回切片结构体，在处理result是请使用断言处理
+// result 返回的结果，当dstModel=nil是返回切片map（[]map[string]interface{}），当dstModel时struct时返回切片结构体指针（[]*T），在处理result是请使用断言处理
 // err 错误信息
 func (md *MysqlDao) More(option MoreOption) (result []interface{}, totals int64, err error) {
 	defer func() {
@@ -219,6 +219,11 @@ func (md *MysqlDao) More(option MoreOption) (result []interface{}, totals int64,
 			log.Printf("ERROR:%s %s:%d ptr:%v ok:%v", err, file, no, pc, ok)
 		}
 	}()
+
+	//默认参数
+	if option.Where == nil {
+		option.Where = md.BuildWhere()
+	}
 
 	//直接主键查询
 	if option.Ids != nil {
@@ -298,22 +303,16 @@ func (md *MysqlDao) Query(sqlStr *string, params []interface{}, dstModel interfa
 	}
 
 	if dstModel != nil {
-		dstModelReflect, err := md.assertStruct(dstModel)
-		if err != nil {
-			return result, err
+		dstModelReflect, err2 := md.assertStruct(dstModel)
+		if err2 != nil {
+			return result, err2
 		}
 		jts := JTStools.NewMapToStruct()
-
-		for i, mapV := range mapData {
-			if i == 0 { //第一个元素存放在dstModel 这块内存空间，提高内存使用效率
-				jts.Transform(dstModel, mapV)
-				result = append(result, dstModel)
-			} else {
-				//根据模具创建对象
-				dstItem := reflect.New(dstModelReflect).Interface()
-				jts.Transform(dstItem, mapV)
-				result = append(result, dstItem)
-			}
+		for _, mapV := range mapData {
+			//根据模具创建对象
+			dstItem := reflect.New(dstModelReflect).Interface()
+			jts.Transform(dstItem, mapV)
+			result = append(result, dstItem)
 		}
 	} else {
 		result = mapData
